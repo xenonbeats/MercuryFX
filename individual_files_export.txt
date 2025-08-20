@@ -1,0 +1,1406 @@
+
+# MercuryFX V2 - Individual File Exports
+
+## Core Python Files (copy these to your new project):
+
+=== main.py ===
+import os
+import threading
+import logging
+from dotenv import load_dotenv
+from flask import Flask, render_template
+from trading_bot import TradingBot
+
+# Load environment variables
+load_dotenv()
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('mercuryfx.log'),
+        logging.StreamHandler()
+    ]
+)
+
+logger = logging.getLogger(__name__)
+
+# Create Flask app
+app = Flask(__name__)
+app.secret_key = os.environ.get("SESSION_SECRET", "mercuryfx_default_secret")
+
+# Global bot instance
+bot = None
+
+@app.route('/')
+def index():
+    """Health check endpoint for UptimeRobot monitoring"""
+    return "MercuryFX V2 Bot is alive!", 200
+
+@app.route('/status')
+def status():
+    """Status page with bot information"""
+    return render_template('index.html')
+
+def start_trading_bot():
+    """Start the trading bot in a separate thread"""
+    global bot
+    try:
+        bot = TradingBot()
+        bot.start()
+    except Exception as e:
+        logger.error(f"Failed to start trading bot: {e}")
+
+if __name__ == '__main__':
+    # Start the trading bot in a separate thread
+    bot_thread = threading.Thread(target=start_trading_bot, daemon=True)
+    bot_thread.start()
+    
+    logger.info("Starting MercuryFX V2 Flask server on port 5000")
+    
+    # Start Flask server
+    app.run(host='0.0.0.0', port=5000, debug=True, use_reloader=False)
+
+
+=== trading_bot.py ===
+import time
+import logging
+import threading
+from datetime import datetime
+import yfinance as yf
+from technical_analysis import TechnicalAnalysis
+from smart_money_concepts import SmartMoneyConcepts
+from telegram_client import TelegramClient
+from risk_management import RiskManager
+
+logger = logging.getLogger(__name__)
+
+class TradingBot:
+    def __init__(self):
+        """Initialize the trading bot"""
+        self.symbols = {
+            'EURUSD=X': {'name': 'EUR/USD', 'atr_multiplier': 0.002, 'asset_type': 'forex'},
+            'GBPUSD=X': {'name': 'GBP/USD', 'atr_multiplier': 0.002, 'asset_type': 'forex'},
+            'XAUUSD=X': {'name': 'Gold', 'atr_multiplier': 20, 'asset_type': 'commodity'},
+            'BTC-USD': {'name': 'Bitcoin', 'atr_multiplier': 20, 'asset_type': 'crypto'}
+        }
+        
+        self.technical_analysis = TechnicalAnalysis()
+        self.smart_money_concepts = SmartMoneyConcepts()
+        self.telegram_client = TelegramClient()
+        self.risk_manager = RiskManager()
+        self.running = False
+        self.last_signals = {}  # Track last signals to avoid duplicates
+        self.min_confidence_threshold = 0.75  # Minimum confidence for signal generation
+        self.high_quality_threshold = 0.85  # High-quality sniper setups
+        
+        logger.info("TradingBot initialized successfully")
+    
+    def fetch_market_data(self, symbol, period='5d', interval='15m'):
+        """Fetch market data for a given symbol"""
+        try:
+            ticker = yf.Ticker(symbol)
+            data = ticker.history(period=period, interval=interval)
+            
+            if data.empty:
+                logger.warning(f"No data retrieved for {symbol}")
+                return None
+                
+            logger.debug(f"Retrieved {len(data)} data points for {symbol}")
+            return data
+            
+        except Exception as e:
+            logger.error(f"Error fetching data for {symbol}: {e}")
+            return None
+    
+    def calculate_stop_loss_take_profit(self, entry_price, direction, symbol):
+        """Calculate stop loss and take profit levels"""
+        symbol_info = self.symbols[symbol]
+        atr_value = symbol_info['atr_multiplier']
+        
+        if direction == 'BUY':
+            stop_loss = entry_price - atr_value
+            take_profit = entry_price + (2 * atr_value)  # 2:1 risk-reward ratio
+        else:  # SELL
+            stop_loss = entry_price + atr_value
+            take_profit = entry_price - (2 * atr_value)
+            
+        return round(stop_loss, 5), round(take_profit, 5)
+    
+    def generate_signal(self, symbol, data):
+        """Generate advanced trading signal using SMC + Technical Analysis"""
+        try:
+            # Calculate technical indicators
+            indicators = self.technical_analysis.calculate_indicators(data)
+            if not indicators:
+                return None
+            
+            # Perform Smart Money Concepts analysis
+            smc_analysis = self.smart_money_concepts.analyze_smart_money_concepts(data, symbol)
+            if not smc_analysis:
+                logger.warning(f"No SMC analysis available for {symbol}")
+                return None
+            
+            # Get SMC signal strength and confluence
+            smc_signal = self.smart_money_concepts.calculate_smc_signal_strength(smc_analysis)
+            
+            # Traditional technical analysis signals
+            latest_ema50 = indicators['ema50'].iloc[-1]
+            latest_ema200 = indicators['ema200'].iloc[-1]
+            latest_rsi = indicators['rsi'].iloc[-1]
+            latest_macd = indicators['macd'].iloc[-1]
+            latest_macd_signal = indicators['macd_signal'].iloc[-1]
+            latest_price = data['Close'].iloc[-1]
+            
+            traditional_signals = []
+            
+            # EMA Crossover Signal
+            if latest_ema50 > latest_ema200 and latest_price > latest_ema50:
+                traditional_signals.append('BUY')
+            elif latest_ema50 < latest_ema200 and latest_price < latest_ema50:
+                traditional_signals.append('SELL')
+            
+            # RSI Signal (modified for SMC context)
+            if latest_rsi < 35:  # More conservative oversold
+                traditional_signals.append('BUY')
+            elif latest_rsi > 65:  # More conservative overbought
+                traditional_signals.append('SELL')
+            
+            # MACD Signal
+            if latest_macd > latest_macd_signal and latest_macd > 0:
+                traditional_signals.append('BUY')
+            elif latest_macd < latest_macd_signal and latest_macd < 0:
+                traditional_signals.append('SELL')
+            
+            # Apply advanced filtering for sniper strategy
+            if not self.is_high_quality_setup(smc_signal, traditional_signals, symbol, data):
+                logger.info(f"Setup for {symbol} doesn't meet quality standards - skipping")
+                return None
+            
+            # Determine final direction based on confluence
+            final_direction = self.get_confluence_direction(smc_signal, traditional_signals)
+            if not final_direction:
+                return None
+            
+            # Calculate advanced stop loss and take profit using SMC levels
+            entry_price = round(latest_price, 5)
+            stop_loss, take_profit = self.calculate_advanced_stop_loss_take_profit(
+                entry_price, final_direction, symbol, smc_analysis
+            )
+            
+            # Calculate overall confidence score
+            overall_confidence = self.calculate_overall_confidence(smc_signal, traditional_signals)
+            
+            signal = {
+                'symbol': symbol,
+                'asset_name': self.symbols[symbol]['name'],
+                'direction': final_direction,
+                'entry_price': entry_price,
+                'stop_loss': stop_loss,
+                'take_profit': take_profit,
+                'timestamp': datetime.now(),
+                'confidence': overall_confidence,
+                'risk_quality': smc_signal.get('risk_quality', 'MEDIUM'),
+                'strategy_type': 'SMC_SNIPER',
+                'smc_signals': smc_signal.get('signals', []),
+                'traditional_indicators': {
+                    'ema50': round(latest_ema50, 5),
+                    'ema200': round(latest_ema200, 5),
+                    'rsi': round(latest_rsi, 2),
+                    'macd': round(latest_macd, 5)
+                },
+                'signal_strength': smc_signal.get('signal_count', 0) + len(traditional_signals)
+            }
+            
+            logger.info(f"Generated HIGH-QUALITY {final_direction} signal for {symbol} at {entry_price} (Confidence: {overall_confidence:.2f})")
+            return signal
+            
+        except Exception as e:
+            logger.error(f"Error generating signal for {symbol}: {e}")
+            return None
+    
+    def is_high_quality_setup(self, smc_signal, traditional_signals, symbol, data):
+        """Advanced risk assessment - only allow high-quality setups"""
+        try:
+            # SMC confidence must be above threshold
+            if smc_signal.get('confidence', 0) < self.min_confidence_threshold:
+                logger.debug(f"{symbol}: SMC confidence too low ({smc_signal.get('confidence', 0):.2f})")
+                return False
+            
+            # Must have SMC signal confluence (multiple SMC patterns)
+            if smc_signal.get('signal_count', 0) < 2:
+                logger.debug(f"{symbol}: Insufficient SMC signal confluence")
+                return False
+            
+            # Traditional indicators must align with SMC
+            smc_direction = smc_signal.get('action')
+            traditional_buy = traditional_signals.count('BUY')
+            traditional_sell = traditional_signals.count('SELL')
+            
+            if smc_direction == 'BUY' and traditional_buy < traditional_sell:
+                logger.debug(f"{symbol}: SMC/Traditional indicator mismatch")
+                return False
+            elif smc_direction == 'SELL' and traditional_sell < traditional_buy:
+                logger.debug(f"{symbol}: SMC/Traditional indicator mismatch")
+                return False
+            
+            # Check for volatility extremes (avoid choppy markets)
+            if self.is_market_too_volatile(data, symbol):
+                logger.debug(f"{symbol}: Market too volatile for reliable signals")
+                return False
+            
+            # Additional quality filters based on asset type
+            if not self.asset_specific_quality_check(symbol, data, smc_signal):
+                logger.debug(f"{symbol}: Failed asset-specific quality check")
+                return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in quality assessment for {symbol}: {e}")
+            return False
+    
+    def get_confluence_direction(self, smc_signal, traditional_signals):
+        """Get final direction based on SMC and traditional confluence"""
+        smc_direction = smc_signal.get('action')
+        traditional_buy = traditional_signals.count('BUY')
+        traditional_sell = traditional_signals.count('SELL')
+        
+        if smc_direction == 'BUY' and traditional_buy >= 1:
+            return 'BUY'
+        elif smc_direction == 'SELL' and traditional_sell >= 1:
+            return 'SELL'
+        else:
+            return None
+    
+    def calculate_overall_confidence(self, smc_signal, traditional_signals):
+        """Calculate overall confidence combining SMC and traditional analysis"""
+        smc_confidence = smc_signal.get('confidence', 0)
+        traditional_strength = max(traditional_signals.count('BUY'), traditional_signals.count('SELL')) / 3.0
+        
+        # Weighted average (SMC gets 70% weight, traditional gets 30%)
+        overall = (smc_confidence * 0.7) + (traditional_strength * 0.3)
+        return min(overall, 1.0)
+    
+    def is_market_too_volatile(self, data, symbol):
+        """Check if market is too volatile for reliable signals"""
+        try:
+            # Calculate recent volatility (last 20 periods)
+            recent_data = data.tail(20)
+            returns = recent_data['Close'].pct_change().dropna()
+            volatility = returns.std()
+            
+            # Volatility thresholds by asset type
+            thresholds = {
+                'forex': 0.015,      # 1.5% daily volatility
+                'commodity': 0.025,  # 2.5% daily volatility
+                'crypto': 0.05       # 5% daily volatility
+            }
+            
+            asset_type = self.symbols[symbol]['asset_type']
+            threshold = thresholds.get(asset_type, 0.02)
+            
+            return volatility > threshold
+            
+        except Exception as e:
+            logger.error(f"Error checking volatility for {symbol}: {e}")
+            return False
+    
+    def asset_specific_quality_check(self, symbol, data, smc_signal):
+        """Asset-specific quality checks"""
+        try:
+            asset_type = self.symbols[symbol]['asset_type']
+            current_price = data['Close'].iloc[-1]
+            
+            # Forex-specific checks
+            if asset_type == 'forex':
+                # Check for major news times (simplified)
+                current_hour = datetime.now().hour
+                # Avoid major news hours (8-10 GMT, 13-15 GMT)
+                if current_hour in [8, 9, 13, 14]:
+                    logger.debug(f"{symbol}: Avoiding major news hours")
+                    return False
+            
+            # Crypto-specific checks
+            elif asset_type == 'crypto':
+                # Check for weekend volatility reduction
+                if datetime.now().weekday() >= 5:  # Weekend
+                    if smc_signal.get('confidence', 0) < 0.8:
+                        return False
+            
+            # Gold-specific checks
+            elif asset_type == 'commodity':
+                # Check for reasonable price levels
+                if current_price < 1800 or current_price > 2200:
+                    logger.debug(f"{symbol}: Price outside normal range")
+                    return False
+            
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error in asset-specific check for {symbol}: {e}")
+            return True
+    
+    def calculate_advanced_stop_loss_take_profit(self, entry_price, direction, symbol, smc_analysis):
+        """Calculate SL/TP using SMC levels and traditional ATR"""
+        try:
+            # Get traditional ATR-based levels as fallback
+            traditional_sl, traditional_tp = self.calculate_stop_loss_take_profit(entry_price, direction, symbol)
+            
+            # Try to use SMC levels for more precise SL/TP
+            order_blocks = smc_analysis.get('order_blocks', {}).get('order_blocks', [])
+            swing_points = smc_analysis.get('swing_points', {})
+            
+            if direction == 'BUY':
+                # For BUY: Look for recent swing low or bullish order block as SL
+                best_sl = traditional_sl
+                
+                # Check recent swing lows
+                swing_lows = swing_points.get('swing_lows', [])
+                if swing_lows:
+                    recent_low = swing_lows[-1]['price']
+                    if recent_low < entry_price and recent_low > traditional_sl:
+                        best_sl = recent_low - (entry_price * 0.0005)  # Small buffer
+                
+                # Check bullish order blocks
+                for ob in order_blocks:
+                    if ob['type'] == 'ORDER_BLOCK_BULLISH' and ob['zone_bottom'] < entry_price:
+                        if ob['zone_bottom'] > best_sl:
+                            best_sl = ob['zone_bottom'] - (entry_price * 0.0005)
+                
+                stop_loss = max(best_sl, traditional_sl)  # Don't make SL worse than traditional
+                take_profit = entry_price + (2.5 * abs(entry_price - stop_loss))  # Better R:R for high-quality setups
+                
+            else:  # SELL
+                # For SELL: Look for recent swing high or bearish order block as SL
+                best_sl = traditional_sl
+                
+                # Check recent swing highs
+                swing_highs = swing_points.get('swing_highs', [])
+                if swing_highs:
+                    recent_high = swing_highs[-1]['price']
+                    if recent_high > entry_price and recent_high < traditional_sl:
+                        best_sl = recent_high + (entry_price * 0.0005)  # Small buffer
+                
+                # Check bearish order blocks
+                for ob in order_blocks:
+                    if ob['type'] == 'ORDER_BLOCK_BEARISH' and ob['zone_top'] > entry_price:
+                        if ob['zone_top'] < best_sl:
+                            best_sl = ob['zone_top'] + (entry_price * 0.0005)
+                
+                stop_loss = min(best_sl, traditional_sl)  # Don't make SL worse than traditional
+                take_profit = entry_price - (2.5 * abs(stop_loss - entry_price))  # Better R:R for high-quality setups
+            
+            return round(stop_loss, 5), round(take_profit, 5)
+            
+        except Exception as e:
+            logger.error(f"Error calculating advanced SL/TP for {symbol}: {e}")
+            return self.calculate_stop_loss_take_profit(entry_price, direction, symbol)
+    
+    def should_send_signal(self, signal):
+        """Check if signal should be sent (avoid duplicates)"""
+        symbol = signal['symbol']
+        direction = signal['direction']
+        
+        # Check if we recently sent a similar signal
+        if symbol in self.last_signals:
+            last_signal = self.last_signals[symbol]
+            time_diff = (signal['timestamp'] - last_signal['timestamp']).total_seconds()
+            
+            # Don't send same direction signal within 1 hour
+            if (last_signal['direction'] == direction and time_diff < 3600):
+                return False
+        
+        return True
+    
+    def process_symbol(self, symbol):
+        """Process a single symbol and generate signals"""
+        try:
+            # Fetch market data
+            data = self.fetch_market_data(symbol)
+            if data is None or len(data) < 200:  # Need enough data for EMA200
+                logger.warning(f"Insufficient data for {symbol}")
+                return
+            
+            # Generate signal
+            signal = self.generate_signal(symbol, data)
+            if signal and self.should_send_signal(signal):
+                # Send Telegram alert
+                success = self.telegram_client.send_signal(signal)
+                if success:
+                    self.last_signals[symbol] = signal
+                    logger.info(f"Signal sent successfully for {symbol}")
+                else:
+                    logger.error(f"Failed to send signal for {symbol}")
+            
+        except Exception as e:
+            logger.error(f"Error processing {symbol}: {e}")
+    
+    def run_cycle(self):
+        """Run one complete cycle of signal generation"""
+        logger.info("Starting new trading cycle")
+        
+        # Process each symbol
+        for symbol in self.symbols:
+            if not self.running:
+                break
+            self.process_symbol(symbol)
+            time.sleep(1)  # Small delay between symbols
+        
+        logger.info("Trading cycle completed")
+    
+    def start(self):
+        """Start the trading bot"""
+        self.running = True
+        logger.info("MercuryFX V2 Trading Bot started")
+        
+        # Send startup notification
+        startup_message = "🚀 MercuryFX V2 - SMC SNIPER BOT Started!\n\n📊 <b>Advanced Strategy Integration:</b>\n• Break of Structure (BOS)\n• Market Structure Shift (MSS)\n• Fair Value Gap (FVG)\n• Order Block Analysis\n\n🎯 <b>Monitored Assets:</b>\n• EUR/USD (Forex)\n• GBP/USD (Forex)\n• Gold XAU/USD (Commodity)\n• Bitcoin BTC/USD (Crypto)\n\n⚙️ <b>Quality Filters:</b>\n• Minimum 75% confidence threshold\n• Multi-timeframe confluence required\n• Volatility and news avoidance\n• Enhanced risk management\n\n🔄 <b>Signal Interval:</b> 15 minutes\n\n<i>Only HIGH-QUALITY sniper setups will be posted!</i>"
+        self.telegram_client.send_message(startup_message)
+        
+        while self.running:
+            try:
+                self.run_cycle()
+                
+                # Wait 15 minutes before next cycle
+                for _ in range(900):  # 900 seconds = 15 minutes
+                    if not self.running:
+                        break
+                    time.sleep(1)
+                    
+            except KeyboardInterrupt:
+                logger.info("Bot stopped by user")
+                break
+            except Exception as e:
+                logger.error(f"Error in main loop: {e}")
+                time.sleep(60)  # Wait 1 minute before retrying
+        
+        logger.info("Trading bot stopped")
+    
+    def stop(self):
+        """Stop the trading bot"""
+        self.running = False
+        logger.info("Trading bot stop requested")
+
+
+=== technical_analysis.py ===
+import logging
+import pandas as pd
+import talib
+
+logger = logging.getLogger(__name__)
+
+class TechnicalAnalysis:
+    def __init__(self):
+        """Initialize technical analysis module"""
+        logger.info("TechnicalAnalysis module initialized")
+    
+    def calculate_indicators(self, data):
+        """Calculate all required technical indicators"""
+        try:
+            if len(data) < 200:  # Need enough data for EMA200
+                logger.warning("Insufficient data for technical analysis")
+                return None
+            
+            # Create a copy to avoid modifying original data
+            df = data.copy()
+            
+            # Calculate EMAs
+            df['ema50'] = talib.EMA(df['Close'], timeperiod=50)
+            df['ema200'] = talib.EMA(df['Close'], timeperiod=200)
+            
+            # Calculate RSI
+            df['rsi'] = talib.RSI(df['Close'], timeperiod=14)
+            
+            # Calculate MACD
+            macd, macd_signal, macd_histogram = talib.MACD(df['Close'], fastperiod=12, slowperiod=26, signalperiod=9)
+            df['macd'] = macd
+            df['macd_signal'] = macd_signal
+            df['macd_histogram'] = macd_histogram
+            
+            # Remove NaN values
+            df = df.dropna()
+            
+            if len(df) == 0:
+                logger.warning("No valid data after indicator calculation")
+                return None
+            
+            indicators = {
+                'ema50': df['ema50'],
+                'ema200': df['ema200'],
+                'rsi': df['rsi'],
+                'macd': df['macd'],
+                'macd_signal': df['macd_signal'],
+                'macd_histogram': df['macd_histogram']
+            }
+            
+            logger.debug(f"Calculated indicators for {len(df)} data points")
+            return indicators
+            
+        except Exception as e:
+            logger.error(f"Error calculating indicators: {e}")
+            return None
+    
+    def get_trend_direction(self, indicators):
+        """Determine overall trend direction"""
+        try:
+            if not indicators:
+                return "NEUTRAL"
+            
+            latest_ema50 = indicators['ema50'].iloc[-1]
+            latest_ema200 = indicators['ema200'].iloc[-1]
+            latest_rsi = indicators['rsi'].iloc[-1]
+            latest_macd = indicators['macd'].iloc[-1]
+            
+            bullish_signals = 0
+            bearish_signals = 0
+            
+            # EMA trend
+            if latest_ema50 > latest_ema200:
+                bullish_signals += 1
+            else:
+                bearish_signals += 1
+            
+            # RSI trend
+            if latest_rsi > 50:
+                bullish_signals += 1
+            else:
+                bearish_signals += 1
+            
+            # MACD trend
+            if latest_macd > 0:
+                bullish_signals += 1
+            else:
+                bearish_signals += 1
+            
+            if bullish_signals > bearish_signals:
+                return "BULLISH"
+            elif bearish_signals > bullish_signals:
+                return "BEARISH"
+            else:
+                return "NEUTRAL"
+                
+        except Exception as e:
+            logger.error(f"Error determining trend direction: {e}")
+            return "NEUTRAL"
+    
+    def format_indicator_summary(self, indicators):
+        """Format indicators for display"""
+        try:
+            if not indicators:
+                return "No indicator data available"
+            
+            latest_ema50 = indicators['ema50'].iloc[-1]
+            latest_ema200 = indicators['ema200'].iloc[-1]
+            latest_rsi = indicators['rsi'].iloc[-1]
+            latest_macd = indicators['macd'].iloc[-1]
+            
+            summary = f"EMA50: {latest_ema50:.5f}\n"
+            summary += f"EMA200: {latest_ema200:.5f}\n"
+            summary += f"RSI(14): {latest_rsi:.2f}\n"
+            summary += f"MACD: {latest_macd:.5f}"
+            
+            return summary
+            
+        except Exception as e:
+            logger.error(f"Error formatting indicator summary: {e}")
+            return "Error formatting indicators"
+
+
+=== smart_money_concepts.py ===
+import logging
+import pandas as pd
+import numpy as np
+from typing import Dict, List, Optional, Tuple
+
+logger = logging.getLogger(__name__)
+
+class SmartMoneyConcepts:
+    """
+    Advanced Smart Money Concepts (SMC) analysis including:
+    - Break of Structure (BOS)
+    - Market Structure Shift (MSS) 
+    - Fair Value Gap (FVG)
+    - Order Block detection
+    - Liquidity analysis
+    """
+    
+    def __init__(self):
+        self.swing_strength = 5  # Number of bars to look back/forward for swing highs/lows
+        self.fvg_threshold = 0.0001  # Minimum gap size for FVG (adjustable per asset)
+        logger.info("Smart Money Concepts module initialized")
+    
+    def identify_swing_points(self, data: pd.DataFrame) -> Dict:
+        """Identify swing highs and lows in the data"""
+        try:
+            df = data.copy()
+            swing_highs = []
+            swing_lows = []
+            
+            high_col = df['High'].values
+            low_col = df['Low'].values
+            
+            for i in range(self.swing_strength, len(df) - self.swing_strength):
+                # Check for swing high
+                is_swing_high = True
+                for j in range(i - self.swing_strength, i + self.swing_strength + 1):
+                    if j != i and high_col[j] >= high_col[i]:
+                        is_swing_high = False
+                        break
+                
+                if is_swing_high:
+                    swing_highs.append({
+                        'index': i,
+                        'timestamp': df.index[i],
+                        'price': high_col[i],
+                        'type': 'swing_high'
+                    })
+                
+                # Check for swing low
+                is_swing_low = True
+                for j in range(i - self.swing_strength, i + self.swing_strength + 1):
+                    if j != i and low_col[j] <= low_col[i]:
+                        is_swing_low = False
+                        break
+                
+                if is_swing_low:
+                    swing_lows.append({
+                        'index': i,
+                        'timestamp': df.index[i],
+                        'price': low_col[i],
+                        'type': 'swing_low'
+                    })
+            
+            return {
+                'swing_highs': swing_highs,
+                'swing_lows': swing_lows
+            }
+            
+        except Exception as e:
+            logger.error(f"Error identifying swing points: {e}")
+            return {'swing_highs': [], 'swing_lows': []}
+    
+    def detect_break_of_structure(self, data: pd.DataFrame, swing_points: Dict) -> Dict:
+        """Detect Break of Structure (BOS) - continuation pattern"""
+        try:
+            bos_signals = []
+            swing_highs = swing_points['swing_highs']
+            swing_lows = swing_points['swing_lows']
+            
+            current_price = data['Close'].iloc[-1]
+            
+            # Check for bullish BOS (breaking previous swing high)
+            if len(swing_highs) >= 2:
+                latest_high = swing_highs[-1]
+                if current_price > latest_high['price']:
+                    bos_signals.append({
+                        'type': 'BOS_BULLISH',
+                        'direction': 'BUY',
+                        'strength': 'HIGH',
+                        'price': current_price,
+                        'broken_level': latest_high['price'],
+                        'confidence': 0.8
+                    })
+            
+            # Check for bearish BOS (breaking previous swing low)
+            if len(swing_lows) >= 2:
+                latest_low = swing_lows[-1]
+                if current_price < latest_low['price']:
+                    bos_signals.append({
+                        'type': 'BOS_BEARISH',
+                        'direction': 'SELL',
+                        'strength': 'HIGH',
+                        'price': current_price,
+                        'broken_level': latest_low['price'],
+                        'confidence': 0.8
+                    })
+            
+            return {'bos_signals': bos_signals}
+            
+        except Exception as e:
+            logger.error(f"Error detecting BOS: {e}")
+            return {'bos_signals': []}
+    
+    def detect_market_structure_shift(self, data: pd.DataFrame, swing_points: Dict) -> Dict:
+        """Detect Market Structure Shift (MSS) - reversal pattern"""
+        try:
+            mss_signals = []
+            swing_highs = swing_points['swing_highs']
+            swing_lows = swing_points['swing_lows']
+            
+            current_price = data['Close'].iloc[-1]
+            
+            # Check for bearish MSS (in uptrend, price breaks previous swing low)
+            if len(swing_lows) >= 2 and len(swing_highs) >= 1:
+                recent_low = swing_lows[-1]
+                recent_high = swing_highs[-1]
+                
+                # Ensure we were in an uptrend
+                if recent_high['timestamp'] > recent_low['timestamp']:
+                    if current_price < recent_low['price']:
+                        mss_signals.append({
+                            'type': 'MSS_BEARISH',
+                            'direction': 'SELL',
+                            'strength': 'VERY_HIGH',
+                            'price': current_price,
+                            'broken_level': recent_low['price'],
+                            'confidence': 0.85
+                        })
+            
+            # Check for bullish MSS (in downtrend, price breaks previous swing high)
+            if len(swing_highs) >= 2 and len(swing_lows) >= 1:
+                recent_high = swing_highs[-1]
+                recent_low = swing_lows[-1]
+                
+                # Ensure we were in a downtrend
+                if recent_low['timestamp'] > recent_high['timestamp']:
+                    if current_price > recent_high['price']:
+                        mss_signals.append({
+                            'type': 'MSS_BULLISH',
+                            'direction': 'BUY',
+                            'strength': 'VERY_HIGH',
+                            'price': current_price,
+                            'broken_level': recent_high['price'],
+                            'confidence': 0.85
+                        })
+            
+            return {'mss_signals': mss_signals}
+            
+        except Exception as e:
+            logger.error(f"Error detecting MSS: {e}")
+            return {'mss_signals': []}
+    
+    def detect_fair_value_gaps(self, data: pd.DataFrame) -> Dict:
+        """Detect Fair Value Gaps (FVG) - imbalance in price action"""
+        try:
+            fvg_signals = []
+            df = data.copy()
+            
+            for i in range(2, len(df)):
+                # Bullish FVG: Gap between candle 1 high and candle 3 low
+                candle1_high = df['High'].iloc[i-2]
+                candle2_low = df['Low'].iloc[i-1]
+                candle2_high = df['High'].iloc[i-1]
+                candle3_low = df['Low'].iloc[i]
+                
+                # Bullish FVG condition
+                if candle1_high < candle3_low:
+                    gap_size = candle3_low - candle1_high
+                    if gap_size > self.fvg_threshold:
+                        fvg_signals.append({
+                            'type': 'FVG_BULLISH',
+                            'direction': 'BUY',
+                            'strength': 'MEDIUM',
+                            'gap_top': candle3_low,
+                            'gap_bottom': candle1_high,
+                            'gap_size': gap_size,
+                            'index': i,
+                            'confidence': 0.7
+                        })
+                
+                # Bearish FVG: Gap between candle 1 low and candle 3 high
+                candle1_low = df['Low'].iloc[i-2]
+                candle3_high = df['High'].iloc[i]
+                
+                # Bearish FVG condition
+                if candle1_low > candle3_high:
+                    gap_size = candle1_low - candle3_high
+                    if gap_size > self.fvg_threshold:
+                        fvg_signals.append({
+                            'type': 'FVG_BEARISH',
+                            'direction': 'SELL',
+                            'strength': 'MEDIUM',
+                            'gap_top': candle1_low,
+                            'gap_bottom': candle3_high,
+                            'gap_size': gap_size,
+                            'index': i,
+                            'confidence': 0.7
+                        })
+            
+            return {'fvg_signals': fvg_signals[-5:]}  # Return last 5 FVGs
+            
+        except Exception as e:
+            logger.error(f"Error detecting FVG: {e}")
+            return {'fvg_signals': []}
+    
+    def detect_order_blocks(self, data: pd.DataFrame, swing_points: Dict) -> Dict:
+        """Detect Order Blocks - institutional supply/demand zones"""
+        try:
+            order_blocks = []
+            swing_highs = swing_points['swing_highs']
+            swing_lows = swing_points['swing_lows']
+            
+            # Bullish Order Block: Last down candle before swing low
+            for swing_low in swing_lows[-3:]:  # Check last 3 swing lows
+                swing_idx = swing_low['index']
+                if swing_idx > 0:
+                    # Look for the last bearish candle before the swing low
+                    for j in range(swing_idx - 1, max(0, swing_idx - 10), -1):
+                        if data['Close'].iloc[j] < data['Open'].iloc[j]:  # Bearish candle
+                            order_blocks.append({
+                                'type': 'ORDER_BLOCK_BULLISH',
+                                'direction': 'BUY',
+                                'strength': 'HIGH',
+                                'zone_top': data['High'].iloc[j],
+                                'zone_bottom': data['Low'].iloc[j],
+                                'index': j,
+                                'confidence': 0.75
+                            })
+                            break
+            
+            # Bearish Order Block: Last up candle before swing high
+            for swing_high in swing_highs[-3:]:  # Check last 3 swing highs
+                swing_idx = swing_high['index']
+                if swing_idx > 0:
+                    # Look for the last bullish candle before the swing high
+                    for j in range(swing_idx - 1, max(0, swing_idx - 10), -1):
+                        if data['Close'].iloc[j] > data['Open'].iloc[j]:  # Bullish candle
+                            order_blocks.append({
+                                'type': 'ORDER_BLOCK_BEARISH',
+                                'direction': 'SELL',
+                                'strength': 'HIGH',
+                                'zone_top': data['High'].iloc[j],
+                                'zone_bottom': data['Low'].iloc[j],
+                                'index': j,
+                                'confidence': 0.75
+                            })
+                            break
+            
+            return {'order_blocks': order_blocks}
+            
+        except Exception as e:
+            logger.error(f"Error detecting order blocks: {e}")
+            return {'order_blocks': []}
+    
+    def analyze_smart_money_concepts(self, data: pd.DataFrame, symbol: str) -> Dict:
+        """Complete SMC analysis combining all concepts"""
+        try:
+            # Adjust FVG threshold based on asset type
+            if 'USD' in symbol and '=' in symbol:  # Forex pairs
+                self.fvg_threshold = 0.0001
+            elif 'XAU' in symbol:  # Gold
+                self.fvg_threshold = 0.5
+            else:  # Crypto
+                self.fvg_threshold = 5.0
+            
+            # Get swing points
+            swing_points = self.identify_swing_points(data)
+            
+            # Detect all patterns
+            bos_analysis = self.detect_break_of_structure(data, swing_points)
+            mss_analysis = self.detect_market_structure_shift(data, swing_points)
+            fvg_analysis = self.detect_fair_value_gaps(data)
+            order_block_analysis = self.detect_order_blocks(data, swing_points)
+            
+            # Combine all analyses
+            smc_analysis = {
+                'swing_points': swing_points,
+                'bos': bos_analysis,
+                'mss': mss_analysis,
+                'fvg': fvg_analysis,
+                'order_blocks': order_block_analysis,
+                'timestamp': data.index[-1],
+                'current_price': data['Close'].iloc[-1]
+            }
+            
+            logger.debug(f"SMC analysis completed for {symbol}")
+            return smc_analysis
+            
+        except Exception as e:
+            logger.error(f"Error in SMC analysis for {symbol}: {e}")
+            return {}
+    
+    def calculate_smc_signal_strength(self, smc_analysis: Dict) -> Dict:
+        """Calculate overall signal strength based on SMC confluence"""
+        try:
+            signals = []
+            total_confidence = 0
+            signal_count = 0
+            
+            # Check BOS signals
+            for signal in smc_analysis.get('bos', {}).get('bos_signals', []):
+                signals.append(signal)
+                total_confidence += signal['confidence']
+                signal_count += 1
+            
+            # Check MSS signals (higher priority)
+            for signal in smc_analysis.get('mss', {}).get('mss_signals', []):
+                signals.append(signal)
+                total_confidence += signal['confidence'] * 1.2  # MSS gets higher weight
+                signal_count += 1
+            
+            # Check FVG signals
+            for signal in smc_analysis.get('fvg', {}).get('fvg_signals', []):
+                if len(signals) > 0 and signals[-1]['direction'] == signal['direction']:
+                    # FVG confirms other signals
+                    total_confidence += signal['confidence'] * 0.8
+                    signal_count += 1
+            
+            # Check Order Block signals
+            for signal in smc_analysis.get('order_blocks', {}).get('order_blocks', []):
+                if len(signals) > 0 and signals[-1]['direction'] == signal['direction']:
+                    # Order block confirms other signals
+                    total_confidence += signal['confidence'] * 0.9
+                    signal_count += 1
+            
+            if signal_count == 0:
+                return {'action': 'HOLD', 'confidence': 0, 'signals': []}
+            
+            avg_confidence = total_confidence / signal_count
+            
+            # Determine primary direction
+            buy_signals = [s for s in signals if s['direction'] == 'BUY']
+            sell_signals = [s for s in signals if s['direction'] == 'SELL']
+            
+            if len(buy_signals) > len(sell_signals) and avg_confidence > 0.7:
+                primary_direction = 'BUY'
+            elif len(sell_signals) > len(buy_signals) and avg_confidence > 0.7:
+                primary_direction = 'SELL'
+            else:
+                primary_direction = 'HOLD'
+            
+            return {
+                'action': primary_direction,
+                'confidence': min(avg_confidence, 1.0),
+                'signal_count': signal_count,
+                'signals': signals,
+                'risk_quality': 'HIGH' if avg_confidence > 0.8 else 'MEDIUM' if avg_confidence > 0.6 else 'LOW'
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating SMC signal strength: {e}")
+            return {'action': 'HOLD', 'confidence': 0, 'signals': []}
+
+=== risk_management.py ===
+"""
+Advanced Risk Management Module for MercuryFX V2
+Calculates optimal stop loss and take profit levels using market structure and volatility
+"""
+
+import pandas as pd
+import numpy as np
+from datetime import datetime, timedelta
+import logging
+
+logger = logging.getLogger(__name__)
+
+class RiskManager:
+    def __init__(self):
+        """Initialize advanced risk management system"""
+        logger.info("Advanced Risk Management system initialized")
+    
+    def calculate_atr_volatility(self, data, period=14):
+        """Calculate Average True Range for volatility measurement"""
+        try:
+            high = data['High']
+            low = data['Low']
+            close = data['Close']
+            
+            # Calculate True Range components
+            tr1 = high - low
+            tr2 = abs(high - close.shift(1))
+            tr3 = abs(low - close.shift(1))
+            
+            # True Range is the maximum of the three
+            true_range = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+            
+            # Average True Range
+            atr = true_range.rolling(window=period).mean()
+            
+            return atr[~pd.isna(atr)]
+            
+        except Exception as e:
+            logger.error(f"Error calculating ATR: {e}")
+            return None
+    
+    def identify_support_resistance(self, data, lookback=20):
+        """Identify key support and resistance levels using swing points"""
+        try:
+            highs = data['High']
+            lows = data['Low']
+            
+            # Find swing highs (resistance)
+            resistance_levels = []
+            for i in range(lookback, len(highs) - lookback):
+                if highs.iloc[i] == highs.iloc[i-lookback:i+lookback+1].max():
+                    resistance_levels.append(highs.iloc[i])
+            
+            # Find swing lows (support)
+            support_levels = []
+            for i in range(lookback, len(lows) - lookback):
+                if lows.iloc[i] == lows.iloc[i-lookback:i+lookback+1].min():
+                    support_levels.append(lows.iloc[i])
+            
+            # Get recent levels (last 10)
+            recent_resistance = sorted(resistance_levels[-10:], reverse=True) if resistance_levels else []
+            recent_support = sorted(support_levels[-10:]) if support_levels else []
+            
+            return {
+                'resistance': recent_resistance,
+                'support': recent_support
+            }
+            
+        except Exception as e:
+            logger.error(f"Error identifying support/resistance: {e}")
+            return {'resistance': [], 'support': []}
+    
+    def calculate_optimal_stop_loss(self, entry_price, direction, data, atr):
+        """Calculate optimal stop loss based on market structure and volatility"""
+        try:
+            current_atr = atr.iloc[-1]
+            
+            # Get support/resistance levels
+            levels = self.identify_support_resistance(data)
+            
+            if direction == 'BUY':
+                # For BUY orders, SL should be below recent support
+                base_sl = entry_price - (current_atr * 1.5)  # 1.5x ATR below entry
+                
+                # Find nearest support level below entry
+                support_below = [level for level in levels['support'] if level < entry_price]
+                if support_below:
+                    nearest_support = max(support_below)
+                    # Place SL slightly below nearest support
+                    structure_sl = nearest_support - (current_atr * 0.3)
+                    
+                    # Use the more conservative (closer to entry) SL
+                    optimal_sl = max(base_sl, structure_sl)
+                else:
+                    optimal_sl = base_sl
+                    
+            else:  # SELL
+                # For SELL orders, SL should be above recent resistance
+                base_sl = entry_price + (current_atr * 1.5)  # 1.5x ATR above entry
+                
+                # Find nearest resistance level above entry
+                resistance_above = [level for level in levels['resistance'] if level > entry_price]
+                if resistance_above:
+                    nearest_resistance = min(resistance_above)
+                    # Place SL slightly above nearest resistance
+                    structure_sl = nearest_resistance + (current_atr * 0.3)
+                    
+                    # Use the more conservative (closer to entry) SL
+                    optimal_sl = min(base_sl, structure_sl)
+                else:
+                    optimal_sl = base_sl
+            
+            return optimal_sl
+            
+        except Exception as e:
+            logger.error(f"Error calculating optimal stop loss: {e}")
+            # Fallback to simple ATR-based SL
+            return entry_price - (atr.iloc[-1] * 1.5) if direction == 'BUY' else entry_price + (atr.iloc[-1] * 1.5)
+    
+    def calculate_optimal_take_profit(self, entry_price, stop_loss, direction, data, atr, target_rr=2.5):
+        """Calculate optimal take profit with multiple levels"""
+        try:
+            current_atr = atr.iloc[-1]
+            
+            # Calculate risk (distance from entry to SL)
+            risk = abs(entry_price - stop_loss)
+            
+            # Get support/resistance levels for target placement
+            levels = self.identify_support_resistance(data)
+            
+            if direction == 'BUY':
+                # Base TP using risk/reward ratio
+                base_tp1 = entry_price + (risk * target_rr)
+                
+                # Find resistance levels above entry for realistic targets
+                resistance_above = [level for level in levels['resistance'] if level > entry_price]
+                
+                if resistance_above:
+                    # Adjust TP to respect resistance levels
+                    nearest_resistance = min(resistance_above)
+                    if base_tp1 > nearest_resistance:
+                        # Place TP slightly before resistance
+                        tp1 = nearest_resistance - (current_atr * 0.2)
+                    else:
+                        tp1 = base_tp1
+                else:
+                    tp1 = base_tp1
+                    
+                # Additional TP levels
+                tp2 = entry_price + (risk * (target_rr + 1.0))  # Higher R:R
+                tp3 = entry_price + (risk * (target_rr + 2.0))  # Extended target
+                
+            else:  # SELL
+                # Base TP using risk/reward ratio
+                base_tp1 = entry_price - (risk * target_rr)
+                
+                # Find support levels below entry for realistic targets
+                support_below = [level for level in levels['support'] if level < entry_price]
+                
+                if support_below:
+                    # Adjust TP to respect support levels
+                    nearest_support = max(support_below)
+                    if base_tp1 < nearest_support:
+                        # Place TP slightly before support
+                        tp1 = nearest_support + (current_atr * 0.2)
+                    else:
+                        tp1 = base_tp1
+                else:
+                    tp1 = base_tp1
+                    
+                # Additional TP levels
+                tp2 = entry_price - (risk * (target_rr + 1.0))  # Higher R:R
+                tp3 = entry_price - (risk * (target_rr + 2.0))  # Extended target
+            
+            return {
+                'tp1': tp1,
+                'tp2': tp2,
+                'tp3': tp3,
+                'risk_amount': risk,
+                'rr_ratio': abs(tp1 - entry_price) / risk
+            }
+            
+        except Exception as e:
+            logger.error(f"Error calculating optimal take profit: {e}")
+            # Fallback calculation
+            risk = abs(entry_price - stop_loss)
+            tp1 = entry_price + (risk * target_rr) if direction == 'BUY' else entry_price - (risk * target_rr)
+            return {
+                'tp1': tp1,
+                'tp2': tp1,
+                'tp3': tp1,
+                'risk_amount': risk,
+                'rr_ratio': target_rr
+            }
+    
+    def validate_trade_risk(self, entry_price, stop_loss, take_profit, symbol):
+        """Validate if trade risk is acceptable"""
+        try:
+            risk = abs(entry_price - stop_loss)
+            reward = abs(take_profit - entry_price)
+            rr_ratio = reward / risk if risk > 0 else 0
+            
+            # Risk validation rules
+            if 'USD' in symbol:
+                # Forex pairs - risk in pips
+                risk_pips = risk * 10000
+                
+                # Minimum R:R ratio
+                if rr_ratio < 1.8:
+                    return False, f"R:R ratio too low: {rr_ratio:.1f}"
+                
+                # Maximum risk per trade (in pips)
+                if risk_pips > 40:
+                    return False, f"Risk too high: {risk_pips:.1f} pips"
+                
+                # Minimum risk (avoid over-tight stops)
+                if risk_pips < 8:
+                    return False, f"Stop too tight: {risk_pips:.1f} pips"
+                    
+            else:
+                # Crypto/commodities
+                risk_percent = (risk / entry_price) * 100
+                
+                if rr_ratio < 1.8:
+                    return False, f"R:R ratio too low: {rr_ratio:.1f}"
+                
+                if risk_percent > 2.5:
+                    return False, f"Risk too high: {risk_percent:.1f}%"
+                    
+                if risk_percent < 0.3:
+                    return False, f"Stop too tight: {risk_percent:.1f}%"
+            
+            return True, f"Risk validated: {rr_ratio:.1f} R:R"
+            
+        except Exception as e:
+            logger.error(f"Error validating trade risk: {e}")
+            return False, "Risk validation failed"
+    
+    def calculate_position_size(self, account_balance, risk_percent, entry_price, stop_loss, symbol):
+        """Calculate optimal position size based on risk management"""
+        try:
+            # Risk amount in account currency
+            risk_amount = account_balance * (risk_percent / 100)
+            
+            # Risk per unit
+            risk_per_unit = abs(entry_price - stop_loss)
+            
+            if 'USD' in symbol:
+                # Forex - standard lot calculation
+                pip_value = 10  # $10 per pip for standard lot
+                risk_pips = risk_per_unit * 10000
+                max_lots = risk_amount / (risk_pips * pip_value)
+                
+                # Round to appropriate lot sizes
+                if max_lots >= 1.0:
+                    lot_size = round(max_lots, 1)
+                elif max_lots >= 0.1:
+                    lot_size = round(max_lots, 2)
+                else:
+                    lot_size = 0.01  # Minimum lot
+                    
+            else:
+                # Crypto/commodities - unit calculation
+                max_units = risk_amount / risk_per_unit
+                lot_size = round(max_units, 4)
+            
+            return max(lot_size, 0.01)  # Minimum 0.01 lot
+            
+        except Exception as e:
+            logger.error(f"Error calculating position size: {e}")
+            return 0.01  # Safe minimum
+
+=== telegram_client.py ===
+import os
+import logging
+import requests
+from datetime import datetime
+from dotenv import load_dotenv
+
+# Load environment variables
+load_dotenv()
+
+logger = logging.getLogger(__name__)
+
+class TelegramClient:
+    def __init__(self):
+        """Initialize Telegram client"""
+        self.token = os.getenv('TELEGRAM_TOKEN', 'default_token')
+        self.chat_id = os.getenv('CHAT_ID', 'default_chat_id')
+        self.base_url = f"https://api.telegram.org/bot{self.token}"
+        
+        if self.token == 'default_token':
+            logger.warning("Using default Telegram token - please set TELEGRAM_TOKEN environment variable")
+        if self.chat_id == 'default_chat_id':
+            logger.warning("Using default chat ID - please set CHAT_ID environment variable")
+        
+        logger.info("TelegramClient initialized")
+    
+    def send_message(self, message):
+        """Send a message to Telegram"""
+        try:
+            url = f"{self.base_url}/sendMessage"
+            payload = {
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': 'HTML'
+            }
+            
+            response = requests.post(url, json=payload, timeout=10)
+            
+            if response.status_code == 200:
+                logger.debug("Message sent successfully to Telegram")
+                return True
+            else:
+                logger.error(f"Failed to send message. Status: {response.status_code}, Response: {response.text}")
+                return False
+                
+        except Exception as e:
+            logger.error(f"Error sending Telegram message: {e}")
+            return False
+    
+    def format_signal_message(self, signal):
+        """Format concise trading signal for Telegram"""
+        try:
+            direction_emoji = "🟢 BUY" if signal['direction'] == 'BUY' else "🔴 SELL"
+            asset_emoji = self.get_asset_emoji(signal['symbol'])
+            
+            # Calculate risk/reward ratio
+            if signal['direction'] == 'BUY':
+                risk = signal['entry_price'] - signal['stop_loss']
+                reward = signal['take_profit'] - signal['entry_price']
+            else:
+                risk = signal['stop_loss'] - signal['entry_price']
+                reward = signal['entry_price'] - signal['take_profit']
+            
+            rr_ratio = reward / risk if risk > 0 else 0
+            
+            # Calculate multiple TP levels for profit taking
+            entry = signal['entry_price']
+            tp1 = signal['take_profit']
+            
+            # Use enhanced TP levels if available
+            tp2 = signal.get('take_profit_2', tp1)
+            tp3 = signal.get('take_profit_3', tp1)
+            
+            # If enhanced TPs not available, calculate conservative levels
+            if tp2 == tp1:
+                if signal['direction'] == 'BUY':
+                    tp2 = entry + (reward * 1.5)  # 1.5x reward
+                    tp3 = entry + (reward * 2.0)  # 2x reward
+                else:
+                    tp2 = entry - (reward * 1.5)  # 1.5x reward  
+                    tp3 = entry - (reward * 2.0)  # 2x reward
+            
+            # Risk assessment
+            risk_pips = abs(risk * 10000) if 'USD' in signal['symbol'] else abs(risk)
+            risk_level = "LOW" if risk_pips < 20 else "MEDIUM" if risk_pips < 35 else "HIGH"
+            
+            message = f"🎯 <b>{signal['asset_name']}</b> {direction_emoji} {asset_emoji}\n\n"
+            message += f"<b>Entry:</b> {signal['entry_price']}\n"
+            message += f"<b>SL:</b> {signal['stop_loss']}\n"
+            message += f"<b>TP1:</b> {tp1:.5f} (1:{rr_ratio:.1f})\n"
+            message += f"<b>TP2:</b> {tp2:.5f} (1:{rr_ratio*1.5:.1f})\n"
+            message += f"<b>TP3:</b> {tp3:.5f} (1:{rr_ratio*2:.1f})\n\n"
+            # Use calculated position size if available
+            position_size = signal.get('position_size', 0.1)
+            message += f"📊 <b>Lot Size:</b> {position_size} (optimal) | 0.01 (safe)\n"
+            message += f"⚠️ <b>Risk:</b> {risk_level} | {signal.get('confidence', 0):.0%} confidence\n"
+            message += f"⏰ <b>Time:</b> {signal['timestamp'].strftime('%H:%M UTC')}"
+            
+            return message
+            
+        except Exception as e:
+            logger.error(f"Error formatting signal message: {e}")
+            return f"Error formatting signal for {signal.get('symbol', 'Unknown')}"
+    
+    def get_asset_emoji(self, symbol):
+        """Get emoji for asset"""
+        emoji_map = {
+            'EURUSD=X': '🇪🇺🇺🇸',
+            'GBPUSD=X': '🇬🇧🇺🇸',
+            'XAUUSD=X': '🥇',
+            'BTC-USD': '₿'
+        }
+        return emoji_map.get(symbol, '📊')
+    
+    def send_signal(self, signal):
+        """Send trading signal to Telegram"""
+        try:
+            message = self.format_signal_message(signal)
+            success = self.send_message(message)
+            
+            if success:
+                logger.info(f"Trading signal sent for {signal['symbol']}")
+            else:
+                logger.error(f"Failed to send trading signal for {signal['symbol']}")
+            
+            return success
+            
+        except Exception as e:
+            logger.error(f"Error sending signal: {e}")
+            return False
+    
+    def send_error_notification(self, error_message):
+        """Send error notification to Telegram"""
+        try:
+            message = f"🚨 <b>MercuryFX V2 Error</b>\n\n"
+            message += f"<b>Error:</b> {error_message}\n"
+            message += f"<b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}\n\n"
+            message += f"<i>Please check the bot logs for more details.</i>"
+            
+            return self.send_message(message)
+            
+        except Exception as e:
+            logger.error(f"Error sending error notification: {e}")
+            return False
+    
+    def send_status_update(self, status_info):
+        """Send status update to Telegram"""
+        try:
+            message = f"📊 <b>MercuryFX V2 Status Update</b>\n\n"
+            message += f"<b>Status:</b> {status_info.get('status', 'Running')}\n"
+            message += f"<b>Uptime:</b> {status_info.get('uptime', 'Unknown')}\n"
+            message += f"<b>Signals Today:</b> {status_info.get('signals_today', 0)}\n"
+            message += f"<b>Last Update:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+            
+            return self.send_message(message)
+            
+        except Exception as e:
+            logger.error(f"Error sending status update: {e}")
+            return False

@@ -1,0 +1,8 @@
+flask==3.0.3
+gunicorn==23.0.0
+numpy==1.26.4
+pandas==2.2.2
+python-dotenv==1.0.1
+python-telegram-bot==21.4
+requests==2.32.3
+yfinance==0.2.28
