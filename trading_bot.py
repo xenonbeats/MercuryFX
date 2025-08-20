@@ -2,9 +2,9 @@ import time
 import logging
 import threading
 from datetime import datetime
-import yfinance as yf
-from technical_analysis import TechnicalAnalysis
-from smart_money_concepts import SmartMoneyConcepts
+from market_data import MarketDataClient
+from technical_analysis_render import TechnicalAnalysisRender
+from smart_money_concepts_render import SmartMoneyConceptsRender
 from telegram_client import TelegramClient
 from risk_management import RiskManager
 
@@ -20,8 +20,9 @@ class TradingBot:
             'BTC-USD': {'name': 'Bitcoin', 'atr_multiplier': 20, 'asset_type': 'crypto'}
         }
         
-        self.technical_analysis = TechnicalAnalysis()
-        self.smart_money_concepts = SmartMoneyConcepts()
+        self.market_data_client = MarketDataClient()
+        self.technical_analysis = TechnicalAnalysisRender()
+        self.smart_money_concepts = SmartMoneyConceptsRender()
         self.telegram_client = TelegramClient()
         self.risk_manager = RiskManager()
         self.running = False
@@ -33,20 +34,7 @@ class TradingBot:
     
     def fetch_market_data(self, symbol, period='5d', interval='15m'):
         """Fetch market data for a given symbol"""
-        try:
-            ticker = yf.Ticker(symbol)
-            data = ticker.history(period=period, interval=interval)
-            
-            if data.empty:
-                logger.warning(f"No data retrieved for {symbol}")
-                return None
-                
-            logger.debug(f"Retrieved {len(data)} data points for {symbol}")
-            return data
-            
-        except Exception as e:
-            logger.error(f"Error fetching data for {symbol}: {e}")
-            return None
+        return self.market_data_client.fetch_data(symbol, period, interval)
     
     def calculate_stop_loss_take_profit(self, entry_price, direction, symbol):
         """Calculate stop loss and take profit levels"""
@@ -80,12 +68,12 @@ class TradingBot:
             smc_signal = self.smart_money_concepts.calculate_smc_signal_strength(smc_analysis)
             
             # Traditional technical analysis signals
-            latest_ema50 = indicators['ema50'].iloc[-1]
-            latest_ema200 = indicators['ema200'].iloc[-1]
-            latest_rsi = indicators['rsi'].iloc[-1]
-            latest_macd = indicators['macd'].iloc[-1]
-            latest_macd_signal = indicators['macd_signal'].iloc[-1]
-            latest_price = data['Close'].iloc[-1]
+            latest_ema50 = indicators['ema50']
+            latest_ema200 = indicators['ema200']
+            latest_rsi = indicators['rsi']
+            latest_macd = indicators['macd']
+            latest_macd_signal = indicators['macd_signal']
+            latest_price = indicators['price']
             
             traditional_signals = []
             
@@ -119,9 +107,7 @@ class TradingBot:
             
             # Calculate advanced stop loss and take profit using SMC levels
             entry_price = round(latest_price, 5)
-            stop_loss, take_profit = self.calculate_advanced_stop_loss_take_profit(
-                entry_price, final_direction, symbol, smc_analysis
-            )
+            stop_loss, take_profit = self.calculate_stop_loss_take_profit(entry_price, final_direction, symbol)
             
             # Calculate overall confidence score
             overall_confidence = self.calculate_overall_confidence(smc_signal, traditional_signals)

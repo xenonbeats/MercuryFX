@@ -1,159 +1,181 @@
 import logging
-import pandas as pd
-import ta
+import math
 
 logger = logging.getLogger(__name__)
 
-class TechnicalAnalysis:
+class TechnicalAnalysisRender:
     def __init__(self):
-        """Initialize technical analysis module"""
-        logger.info("TechnicalAnalysis module initialized")
+        """Initialize technical analysis module with pure Python calculations"""
+        logger.info("TechnicalAnalysisRender module initialized")
     
-    def calculate_indicators(self, data):
-        """Calculate all required technical indicators using ta library (Render compatible)"""
+    def calculate_ema(self, prices, period):
+        """Calculate Exponential Moving Average"""
+        if len(prices) < period:
+            return None
+            
+        alpha = 2 / (period + 1)
+        ema = [prices[0]]
+        
+        for i in range(1, len(prices)):
+            ema.append(alpha * prices[i] + (1 - alpha) * ema[i-1])
+        
+        return ema
+    
+    def calculate_rsi(self, prices, period=14):
+        """Calculate RSI"""
+        if len(prices) < period + 1:
+            return None
+            
+        deltas = [prices[i] - prices[i-1] for i in range(1, len(prices))]
+        
+        gains = [delta if delta > 0 else 0 for delta in deltas]
+        losses = [-delta if delta < 0 else 0 for delta in deltas]
+        
+        # Calculate initial averages
+        avg_gain = sum(gains[:period]) / period
+        avg_loss = sum(losses[:period]) / period
+        
+        rsi_values = []
+        
+        for i in range(period, len(deltas)):
+            if avg_loss == 0:
+                rsi_values.append(100)
+            else:
+                rs = avg_gain / avg_loss
+                rsi = 100 - (100 / (1 + rs))
+                rsi_values.append(rsi)
+            
+            # Update averages for next iteration
+            if i < len(deltas) - 1:
+                avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+                avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        
+        return rsi_values
+    
+    def calculate_macd(self, prices, fast=12, slow=26, signal=9):
+        """Calculate MACD"""
+        if len(prices) < slow:
+            return None, None, None
+            
+        ema_fast = self.calculate_ema(prices, fast)
+        ema_slow = self.calculate_ema(prices, slow)
+        
+        if not ema_fast or not ema_slow:
+            return None, None, None
+        
+        # Calculate MACD line
+        macd_line = []
+        for i in range(len(ema_slow)):
+            if i < len(ema_fast):
+                macd_line.append(ema_fast[i] - ema_slow[i])
+        
+        # Calculate signal line
+        macd_signal = self.calculate_ema(macd_line, signal)
+        
+        if not macd_signal:
+            return macd_line, None, None
+        
+        # Calculate histogram
+        macd_histogram = []
+        for i in range(len(macd_signal)):
+            if i < len(macd_line):
+                macd_histogram.append(macd_line[i] - macd_signal[i])
+        
+        return macd_line, macd_signal, macd_histogram
+    
+    def calculate_indicators(self, market_data):
+        """Calculate all technical indicators from market data"""
         try:
-            if len(data) < 200:  # Need enough data for EMA200
+            if not market_data or len(market_data['close']) < 200:
                 logger.warning("Insufficient data for technical analysis")
                 return None
             
-            # Create a copy to avoid modifying original data
-            df = data.copy()
+            prices = market_data['close']
             
-            # Calculate EMAs using ta library
-            df['ema50'] = ta.trend.ema_indicator(df['Close'], window=50)
-            df['ema200'] = ta.trend.ema_indicator(df['Close'], window=200)
+            # Calculate EMAs
+            ema50 = self.calculate_ema(prices, 50)
+            ema200 = self.calculate_ema(prices, 200)
             
-            # Calculate RSI using ta library
-            df['rsi'] = ta.momentum.rsi(df['Close'], window=14)
-            
-            # Calculate MACD using ta library
-            df['macd'] = ta.trend.macd_diff(df['Close'])
-            df['macd_signal'] = ta.trend.macd_signal(df['Close'])
-            df['macd_histogram'] = ta.trend.macd(df['Close']) - ta.trend.macd_signal(df['Close'])
-            
-            # Remove NaN values
-            df = df.dropna()
-            
-            if len(df) == 0:
-                logger.warning("No valid data after indicator calculation")
+            if not ema50 or not ema200:
+                logger.error("Failed to calculate EMAs")
                 return None
             
+            # Calculate RSI
+            rsi = self.calculate_rsi(prices, 14)
+            
+            if not rsi:
+                logger.error("Failed to calculate RSI")
+                return None
+            
+            # Calculate MACD
+            macd_line, macd_signal, macd_histogram = self.calculate_macd(prices)
+            
+            if not macd_line or not macd_signal:
+                logger.error("Failed to calculate MACD")
+                return None
+            
+            # Get latest values
+            latest_price = prices[-1]
+            latest_ema50 = ema50[-1] if ema50 else None
+            latest_ema200 = ema200[-1] if ema200 else None
+            latest_rsi = rsi[-1] if rsi else None
+            latest_macd = macd_line[-1] if macd_line else None
+            latest_macd_signal = macd_signal[-1] if macd_signal else None
+            latest_macd_histogram = macd_histogram[-1] if macd_histogram else None
+            
             indicators = {
-                'ema50': df['ema50'],
-                'ema200': df['ema200'],
-                'rsi': df['rsi'],
-                'macd': df['macd'],
-                'macd_signal': df['macd_signal'],
-                'macd_histogram': df['macd_histogram']
+                'price': latest_price,
+                'ema50': latest_ema50,
+                'ema200': latest_ema200,
+                'rsi': latest_rsi,
+                'macd': latest_macd,
+                'macd_signal': latest_macd_signal,
+                'macd_histogram': latest_macd_histogram,
+                'raw_data': {
+                    'prices': prices,
+                    'ema50_series': ema50,
+                    'ema200_series': ema200,
+                    'rsi_series': rsi,
+                    'macd_series': macd_line
+                }
             }
             
-            logger.debug(f"Calculated indicators for {len(df)} data points")
+            logger.info(f"Calculated indicators: EMA50={latest_ema50:.5f}, EMA200={latest_ema200:.5f}, RSI={latest_rsi:.2f}")
             return indicators
             
         except Exception as e:
-            logger.error(f"Error calculating indicators: {e}")
+            logger.error(f"Error calculating technical indicators: {e}")
             return None
     
     def get_trend_direction(self, indicators):
-        """Determine overall trend direction"""
+        """Determine trend direction from indicators"""
         try:
-            if not indicators:
-                return "NEUTRAL"
-            
-            latest_ema50 = indicators['ema50'].iloc[-1]
-            latest_ema200 = indicators['ema200'].iloc[-1]
-            latest_rsi = indicators['rsi'].iloc[-1]
-            latest_macd = indicators['macd'].iloc[-1]
-            
-            bullish_signals = 0
-            bearish_signals = 0
+            ema50 = indicators['ema50']
+            ema200 = indicators['ema200']
+            rsi = indicators['rsi']
+            macd_histogram = indicators['macd_histogram']
             
             # EMA trend
-            if latest_ema50 > latest_ema200:
-                bullish_signals += 1
-            else:
-                bearish_signals += 1
+            ema_bullish = ema50 > ema200
             
-            # RSI trend
-            if latest_rsi > 50:
-                bullish_signals += 1
-            else:
-                bearish_signals += 1
+            # RSI momentum
+            rsi_bullish = rsi > 50
+            rsi_oversold = rsi < 35
+            rsi_overbought = rsi > 65
             
-            # MACD trend
-            if latest_macd > 0:
-                bullish_signals += 1
-            else:
-                bearish_signals += 1
+            # MACD momentum
+            macd_bullish = macd_histogram > 0
             
-            if bullish_signals > bearish_signals:
-                return "BULLISH"
-            elif bearish_signals > bullish_signals:
-                return "BEARISH"
+            # Combine signals
+            bullish_signals = sum([ema_bullish, rsi_bullish, macd_bullish])
+            
+            if bullish_signals >= 2 and not rsi_overbought:
+                return 'BULLISH'
+            elif bullish_signals <= 1 and not rsi_oversold:
+                return 'BEARISH'
             else:
-                return "NEUTRAL"
+                return 'NEUTRAL'
                 
         except Exception as e:
-            logger.error(f"Error determining trend direction: {e}")
-            return "NEUTRAL"
-    
-    def format_indicator_summary(self, indicators):
-        """Format indicators for display"""
-        try:
-            if not indicators:
-                return "No indicator data available"
-            
-            latest_ema50 = indicators['ema50'].iloc[-1]
-            latest_ema200 = indicators['ema200'].iloc[-1]
-            latest_rsi = indicators['rsi'].iloc[-1]
-            latest_macd = indicators['macd'].iloc[-1]
-            
-            summary = f"EMA50: {latest_ema50:.5f}, EMA200: {latest_ema200:.5f}, "
-            summary += f"RSI: {latest_rsi:.1f}, MACD: {latest_macd:.5f}"
-            
-            return summary
-            
-        except Exception as e:
-            logger.error(f"Error formatting indicators: {e}")
-            return "Error formatting indicators"
-    
-    def get_signal_strength(self, indicators):
-        """Calculate signal strength based on indicator alignment"""
-        try:
-            if not indicators:
-                return 0.0
-                
-            latest_ema50 = indicators['ema50'].iloc[-1]
-            latest_ema200 = indicators['ema200'].iloc[-1]
-            latest_rsi = indicators['rsi'].iloc[-1]
-            latest_macd = indicators['macd'].iloc[-1]
-            latest_macd_signal = indicators['macd_signal'].iloc[-1]
-            
-            strength = 0.0
-            max_strength = 5.0
-            
-            # EMA alignment (20% weight)
-            if latest_ema50 > latest_ema200:
-                strength += 1.0
-            
-            # RSI momentum (20% weight)
-            if 30 <= latest_rsi <= 70:  # Not oversold/overbought
-                strength += 1.0
-            
-            # MACD signal (20% weight)  
-            if latest_macd > latest_macd_signal:
-                strength += 1.0
-                
-            # MACD zero line (20% weight)
-            if latest_macd > 0:
-                strength += 1.0
-                
-            # RSI trend strength (20% weight)
-            if latest_rsi > 50:
-                strength += 1.0
-            
-            return strength / max_strength
-            
-        except Exception as e:
-            logger.error(f"Error calculating signal strength: {e}")
-            return 0.0
+            logger.error(f"Error determining trend: {e}")
+            return 'NEUTRAL'
